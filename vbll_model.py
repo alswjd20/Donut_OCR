@@ -302,15 +302,22 @@ class BARTDecoder(nn.Module):
             return_dict=return_dict,
         )
 
-        # 원래 코드
-        # 아래의 logit이 inference 할 땐 decoder_output.scores로 나옴 (utils.py 파일 보면)
+        # 원래 코드, 아래의 lm_head에서 나온 logit이 inference 할 땐 decoder_output.scores로 나옴 (utils.py 파일 보면)
         # logits = self.model.lm_head(outputs[0])
 
+
+        # outputs의 type : <class 'transformers.modeling_outputs.BaseModelOutputWithPastAndCrossAttentions'>
+        # outputs.keys() : odict_keys(['last_hidden_state', 'past_key_values']) # BaseModelOutputWithPastAndCrossAttentions Doc string에 따르면 
+        # outputs[0] : last_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`): Sequence of hidden-states at the output of the last layer of the model.
+        # outputs[1] : past_key_values
+
+        # outputs[0] = last_hidden_state에 해당, shape : torch.Size([1, 767, 1024])
+        # 위의 Docstring 나와있는대로 (batch_size = 1, max_length = 767, in_features = 1024)임을 알 수 있음 
+
         
-        breakpoint() # 이 아래에서 Genclassification 클래스의 forward 함수가 실행됨
-        # 지금 lm_head을 GenClassification로 정의했는데, forward 함수가 실행시 cuda out of memory 에러 발생
+        breakpoint() # 이 아래에서 Disclassification 클래스의 forward 함수가 실행됨
+        # 지금 lm_head을 DisClassification로 정의했는데, forward 함수가 실행시 cuda out of memory 에러 발생
         vbll_output = self.model.lm_head(outputs[0]) # logits = self.model.lm_head(outputs[0][labels != -100]) 
-        # 여기서 Genclassification 클래스의 forward 함수가 실행되고, out을 return 받음 
         # vbll_output은, VBLLReturn(predictive=Categorical(probs: torch.Size([1, 767, 1, 1024])), train_loss_fn=<function GenClassification._get_train_loss_fn.<locals>.loss_fn at 0x7f2de0343c20>, val_loss_fn=<function GenClassification._get_val_loss_fn.<locals>.loss_fn at 0x7f2de0343cb0>, ood_scores=None)
 
         logits = vbll_output.predictive.probs.squeeze() # vbll_output.predictive.probs.shape : torch.Size([1, 767, 1, 57580]) -> squeeze하면 torch.size([767, 57580])
@@ -450,7 +457,7 @@ class DonutModel(PreTrainedModel):
 
         self.current_img_idx = 0
         self.current_epoch = 0
-        self.edl_train_loss = dict()
+        self.vbll_train_loss = dict()
         self.train_loss = []
 
 
@@ -503,15 +510,16 @@ class DonutModel(PreTrainedModel):
         
         if self.current_img_idx == 799:
             # print("리스트의 value 개수, length : ", len(self.train_loss))
-            self.edl_train_loss[self.current_epoch] = sum(self.train_loss) / len(self.train_loss)
+            self.vbll_train_loss[self.current_epoch] = sum(self.train_loss) / len(self.train_loss)
 
-            with open('train_loss_edl_loss_5_0521_vbll.json','w') as f:
-                json.dump(self.edl_train_loss, f)
+            with open('train_loss_vbll_loss_5_0521_vbll.json','w') as f:
+                json.dump(self.vbll_train_loss, f)
                 print("json 파일 생성")
             
             self.current_epoch += 1
             self.current_img_idx = 0
             self.train_loss = []
+            torch.cuda.empty_cache() 
         
         else:
             self.current_img_idx += 1
