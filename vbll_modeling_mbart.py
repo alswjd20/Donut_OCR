@@ -1731,11 +1731,6 @@ class MBartForCausalLM(MBartPreTrainedModel):
         # breakpoint() # config.hidden_size : 1024, config.vocab_size : 57580
         self.lm_head = GenClassification(in_features = config.hidden_size, out_features = config.vocab_size, regularization_weight = 0.01) # regularization_weight는 내가 지정했음 
         
-        # breakpoint()
-
-        self._init_weights(self.edl_layer) 
-
-
         # Initialize weights and apply final processing
         self.post_init()
     
