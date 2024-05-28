@@ -897,7 +897,7 @@ class DonutModel(PreTrainedModel):
         output["logits"] = decoder_output.scores
         
         # edl은 alpha를 갖고 확률을 계산
-        output["prob_alpha"] = edl_posterior_scores 이건 내가 추가한 edl_layer에서 나온 값으로
+        output["prob_alpha"] = edl_posterior_scores # 이건 내가 추가한 edl_layer에서 나온 값으로
         output["prob_softmax"] = softmax_scores # 이건 기존 lm_head에서 나온 값으로
 
         output["model_pred_id"] = model_pred_ids
