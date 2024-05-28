@@ -198,12 +198,10 @@ class GreedySearchEncoderDecoderOutput(ModelOutput):
             `torch.FloatTensor` of shape `(batch_size, generated_length, hidden_size)`.
     """
 
-    # 4번을 위해 추가 
     # decoder_output 출력해보니, GreedySearchEncoderDecoderOutput라고 나와있길래 여기에 edl_score 추가했어 
-
     sequences: torch.LongTensor = None
     scores: Optional[Tuple[torch.FloatTensor]] = None
-    edl_scores : Optional[Tuple[torch.FloatTensor]] = None # 여기 추가했음 
+    edl_scores : Optional[Tuple[torch.FloatTensor]] = None # 여기 4번을 위해 추가 
     encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
     encoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     decoder_attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
@@ -2301,21 +2299,34 @@ class GenerationMixin:
 
             if synced_gpus and this_peer_finished:
                 continue  # don't waste resources running the code we don't need
-
-             
+            
+            """ 정말 잠시 주석처리 좀 ...0514 
+            print("여기 실행 되겠지? 0514") # train 할 땐 실행 안되고, test 하면 실행 됨 """
+            # breakpoint()
+            # print("~~~~~~~~~~~~~~~~~ 혹시 여기 train 할 때도 실행 됨? 0515~~~~~~~~~~~~~~~~~~~~~~~~") # train할땐 여기 실행 안된다. test때만. 
+            # 와 outputs 쳐봤는데, 안에 alphas가 있다... alphas가 있어... (물론 logits도 있다..)
+            # ('alphas', tensor([[[ 1.0000,  1.0000, 41.5938,  ...,  1.0000,  1.0000,  1.0000]]], device='cuda:0', dtype=torch.float16)) # outputs.alphas.shape : torch.Size([1, 1, 57580])
+            # ('logits', tensor([[[26.7969, -3.3828, 41.2500,  ...,  1.0908,  0.3792,  3.8906]]], device='cuda:0', dtype=torch.float16)) # outputs.logits.shape : torch.Size([1, 1, 57580])
+            
+            
             next_token_logits = outputs.logits[:, -1, :] # outputs.logits[:, -1, :]의 shape : torch.Size([1, 57580])
-            # 4번을 위해 추가
-            # next_token_logits = outputs.edl_logits[:, -1, :] # outputs.logits[:, -1, :]의 shape : torch.Size([1, 57580]) # edl_layer에서 나온 값으로 Ted_accuracy 뽑아볼 때
+            # next_token_logits = outputs.alphas[:, -1, :] # edl_layer에서 나온 애를 갖고 Ted_accuracy 뽑아보기 위해.. 근데 이렇게 하는게 맞는지 모르겠다. 
+            # next_token_logits = outputs.edl_logits[:, -1, :] # outputs.logits[:, -1, :]의 shape : torch.Size([1, 57580])
 
             next_tokens_scores = logits_processor(input_ids, next_token_logits)
+            # next_tokens_scores : tensor([[26.7969, -3.3828, 41.2500,  ...,  1.0908,  0.3792,  3.8906]], device='cuda:0', dtype=torch.float16) # torch.Size([1, 57580])
+            # breakpoint()
 
+            """ 
+            # 5번 실행시켜야 해서 잠시만 여기 바로 아래 주석처리좀. 아래는 4번을 위한 부분. """
             edl_logits = outputs.edl_logits[:, -1, :] # 형식 맞춰주기. torch.Size([1, 57580]) # edl_logits은 edl_layer에서 바로 나온 결과값 
-            # alphas = outputs.alphas[:, -1, :] # 형식 맞춰주기. torch.Size([1, 57580]) # alphas는 edl_logits에 Relu 취하고 1 더해준 값 
+            # alphas = outputs.alphas[:, -1, :] # 형식 맞춰주기. torch.Size([1, 57580]) # alphas는 edl_logits에 Relu 취하고 1 더해준 값
 
             # Store scores, attentions and hidden_states when required
             if return_dict_in_generate:
                 if output_scores:
                     scores += (next_tokens_scores,)
+                """마찬가지. 5번을 위해 여기 아래 통째로 주석처리좀. """
                 if output_edl_scores: # 이 부분 4번을 위해 추가했음 
                     edl_scores += (edl_logits,) # 이 부분 4번을 위해 추가했음 
                 if output_attentions:
@@ -2374,6 +2385,7 @@ class GenerationMixin:
                 return GreedySearchDecoderOnlyOutput(
                     sequences=input_ids,
                     scores=scores,
+                    edl_scores=edl_scores, # 4번을 위해 추가했음 
                     attentions=decoder_attentions,
                     hidden_states=decoder_hidden_states,
                 )
