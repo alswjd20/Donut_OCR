@@ -44,7 +44,7 @@ from ...utils import (
 )
 from .configuration_mbart import MBartConfig
 
-from donut.vbll import Normal, DenseNormal, GenClassification, get_parameterization # 5번을 위해 추가 
+# from donut.vbll import Normal, DenseNormal, GenClassification, DiscClassification, get_parameterization # 5번을 위해 추가 
 
 
 
@@ -1277,12 +1277,13 @@ class MBartModel(MBartPreTrainedModel):
 )
 class MBartForConditionalGeneration(MBartPreTrainedModel):
     base_model_prefix = "model"
+    # 4번을 위해 추가
     _keys_to_ignore_on_load_missing = [
         r"final_logits_bias",
         r"encoder.version",
         r"decoder.version",
         r"lm_head.weight",
-        r"edl_layer.weight", # 4번을 위해 추가
+        r"edl_layer.weight",
         "encoder.embed_tokens.weight",
         "decoder.embed_tokens.weight",
     ]
@@ -1739,15 +1740,28 @@ class MBartForCausalLM(MBartPreTrainedModel):
         super().__init__(config)
         self.model = MBartDecoderWrapper(config)
 
+        # 5번을 위해 추가 
+        # breakpoint() # config.hidden_size : 1024, config.vocab_size : 57580
+        # GenClassification, DiscClassification 중 하나 선택 
+        """ 
+        self.lm_head = DiscClassification(in_features = config.hidden_size, out_features = config.vocab_size, regularization_weight = 0.01, parameterization = 'diagonal') # regularization_weight는 내가 지정했음 
+        """ 
+        # normal & Disclassificaiton 되는지 확인
+        # 마지막 layer만 freeze 시키는 것 잊지 말기 
+        # 그래도 메모리가 터진다면 token 단위로 해보기 
+
+        
+        # 4번을 위해 추가 - 5번, vbll 구현을 위해 잠시 아래 통째로 주석 처리 
         
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False) # weight는 있고, bias는 없군. 
         print("이건 MBartForCausalLM 안에 있는 lm_head임") # test 할 때도 실행됨 
 
-        self.edl_layer = nn.Linear(config.hidden_size, 57580, bias=False) # 4번을 위해 추가 
+        self.edl_layer = nn.Linear(config.hidden_size, 57580, bias=False) # config.vocab_size : 57525 -> 이렇게 하면 model에서 차원이 안맞는다는 오류가 나서 그냥 57580으로 지정함 
         print("layer 평행하게 추가하였음")
-        # breakpoint()
+        # breakpoint() 
 
-        self._init_weights(self.edl_layer) # 4번 
+        self._init_weights(self.edl_layer) 
+        
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1905,7 +1919,7 @@ class MBartForCausalLM(MBartPreTrainedModel):
         breakpoint()
 
         # 4번을 위해 추가
-        logits_edl = self.edl_layer(outputs[0])
+        # logits_edl = self.edl_layer(outputs[0])
 
         loss = None
         if labels is not None:
@@ -1919,7 +1933,7 @@ class MBartForCausalLM(MBartPreTrainedModel):
         return CausalLMOutputWithCrossAttentions(
             loss=loss,
             logits=logits,
-            logits_edl=logits_edl, # 4번을 위해 추가 
+            # logits_edl=logits_edl, # 4번을 위해 추가 
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
