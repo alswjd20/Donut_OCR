@@ -315,8 +315,10 @@ class BARTDecoder(nn.Module):
         # 위의 Docstring 나와있는대로 (batch_size = 1, max_length = 767, in_features = 1024)임을 알 수 있음 
 
         
-        breakpoint() # 이 아래에서 Disclassification 클래스의 forward 함수가 실행됨
+        # breakpoint() # 이 아래에서 Disclassification 클래스의 forward 함수가 실행됨
         # 지금 lm_head을 DisClassification로 정의했는데, forward 함수가 실행시 cuda out of memory 에러 발생
+        
+        breakpoint() # outputs[0].shape : torch.Size([1, 767, 1024])
         vbll_output = self.model.lm_head(outputs[0]) # logits = self.model.lm_head(outputs[0][labels != -100]) 
         # vbll_output은, VBLLReturn(predictive=Categorical(probs: torch.Size([1, 767, 1, 1024])), train_loss_fn=<function GenClassification._get_train_loss_fn.<locals>.loss_fn at 0x7f2de0343c20>, val_loss_fn=<function GenClassification._get_val_loss_fn.<locals>.loss_fn at 0x7f2de0343cb0>, ood_scores=None)
 
@@ -333,7 +335,7 @@ class BARTDecoder(nn.Module):
             # ce_loss = loss_fct(logits.view(-1, self.model.config.vocab_size), labels.view(-1)) # vocab_size는 57580
 
             loss_fn = self.model.lm_head._get_train_loss_fn(logits.view(-1, self.model.config.vocab_size))              
-            loss_fn = self.model.lm_head._get_train_loss_fn(logits) # # ignore_id 하는 과정도 추가해야 함
+            loss_fn = self.model.lm_head._get_train_loss_fn(logits) # ignore_id 하는 과정도 추가해야 함
 
             breakpoint()
             loss = loss_fn(labels.view(-1)) # labels.view(-1).shape : torch.Size([767])
@@ -487,18 +489,19 @@ class DonutModel(PreTrainedModel):
         )
         
         
-        print("### loss값 계산한 직후 - 혹시라도 풀렸을까봐 다시 freeze")
+        """5번, 6번, freeze 시키는 경우  """
+        print("####### loss값 계산한 직후 - freeze 되었는지 확인") # 진짜 한 번 확인해볼까? 잘 freeze 되었는지  -> 잘 되긴 했는데, 혹시 모르니 
         for param in self.parameters():
             param.requires_grad = False
         for last_param in self.decoder.model.lm_head.parameters():
-            # print("마지막 layer만 freeze 시키지 않음..")
             last_param.requires_grad = True
-
+        for last_param in self.decoder.model.edl_layer.parameters():
+            last_param.requires_grad = True  # 마지막 layer만 freeze 시키지 않음..
         for name, all_param in self.named_parameters():
             if all_param.requires_grad == True : 
-                print("#### loss값 계산한 직후 - freeze 안된 layer : ", name)
-                # print("### loss값 계산한 직후 - freeze 안된 layer : ", all_param.shape) # torch.Size([57580, 1024])
-                print("###loss값 계산한 직후 - freeze 안된 layer : ", all_param.requires_grad)
+                print("######## loss값 계산한 직후 - freeze 안된 layer : ", name)
+                # print("######## loss값 계산한 직후 - freeze 안된 layer : ", all_param.shape) # torch.Size([57580, 1024])
+                # print("######### loss값 계산한 직후 - freeze 안된 layer : ", all_param.requires_grad) 
 
         
         with torch.no_grad():
