@@ -44,7 +44,7 @@ from ...utils import (
 )
 from .configuration_mbart import MBartConfig
 
-from donut.vbll import Normal, DenseNormal, GenClassification, get_parameterization # vbll을 위해 추가 
+from donut.vbll import Normal, DenseNormal, GenClassification, DiscClassification, get_parameterization # vbll을 위해 추가 
 
 
 
@@ -1729,7 +1729,7 @@ class MBartForCausalLM(MBartPreTrainedModel):
 
         # vbll을 위해 추가 
         # breakpoint() # config.hidden_size : 1024, config.vocab_size : 57580
-        self.lm_head = GenClassification(in_features = config.hidden_size, out_features = config.vocab_size, regularization_weight = 0.01) # regularization_weight는 내가 지정했음 
+        self.lm_head = DiscClassification(in_features = config.hidden_size, out_features = config.vocab_size, regularization_weight = 0.01, parameterization = 'diagonal') # regularization_weight는 내가 지정했음 
         
         # Initialize weights and apply final processing
         self.post_init()
