@@ -24,8 +24,10 @@ from transformers import MBartConfig, MBartForCausalLM, XLMRobertaTokenizer
 from transformers.file_utils import ModelOutput
 from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
 import wandb
+import tensorflow as tf
 
 # uncertainty quantification for classification 논문 적용
+# => 9_edl
 
 
 class SwinEncoder(nn.Module):
@@ -189,6 +191,7 @@ class BARTDecoder(nn.Module):
         # print("pad_token_id 확인 : ", self.tokenizer.pad_token_id) # 그냥 1이라 나옴 
 
         self.model.prepare_inputs_for_generation = self.prepare_inputs_for_inference
+        self.softplus = nn.Softplus()
 
         # weight init with asian-bart
         if not name_or_path:
@@ -208,6 +211,7 @@ class BARTDecoder(nn.Module):
                 else:
                     new_bart_state_dict[x] = bart_state_dict[x]
             self.model.load_state_dict(new_bart_state_dict)
+        
 
 
 
@@ -246,44 +250,20 @@ class BARTDecoder(nn.Module):
         return output
     
 
-    def loglikelihood_loss(self, y, alpha, ignore_index, labels):
-        # if not device:
-        #     device = 'cuda'
-        # y = y.to(device)
-        # alpha = alpha.to(device)
+    def loglikelihood_loss(self, y, alpha): # y : torch.Size([33, 57580]), alpha : torch.Size([33, 57580])
 
-        S = torch.sum(alpha, dim=1, keepdim=True) # torch.Size([767, 1])
+        # breakpoint()
 
-        # 초기화
-        squared_error = torch.zeros(len(labels[labels != ignore_index]), 57580)
-        variance = torch.zeros(len(labels[labels != ignore_index]), 57580)
+        S = torch.sum(alpha, dim=1, keepdim=True) # torch.Size([767, 1]) -> [33, 1]
+
+        # breakpoint()
         
-        squared_error = (torch.tensor(y[labels != ignore_index]).to('cuda') - (alpha[labels != ignore_index] / S[labels != ignore_index])) ** 2 
-        variance = alpha[labels != ignore_index] * (S[labels != ignore_index] - alpha[labels != ignore_index].float()) / (S[labels != ignore_index] * S[labels != ignore_index] * (S[labels != ignore_index] + 1))
+        squared_error = (torch.tensor(y).to('cuda') - (alpha / S)) ** 2 
+        variance = alpha * (S - alpha.float()) / (S * S * (S + 1))
 
         # breakpoint() # squared_error랑, variance에 requires_grad = True 붙어있어? 
         # squared_error : grad_fn=<PowBackward0>
         # variance : grad_fn=<DivBackward0>
-
-        """ 기존 코드 -> 교수님께서 너무 비효율적이라고, 바꾸라고 하셨다 
-        # squared_error나, variance나, 둘 다 (767, 57580) 형태의 텐서.. 
-        squared_error = (torch.tensor(y).to('cuda') - (alpha / S)) ** 2 
-        variance = alpha * (S - alpha.float()) / (S * S * (S + 1))
-
-        # ignore_index = -100 -> 0로 된 부분 무시하도록 하는 부분
-        bool_tensor = torch.tensor(labels) == ignore_index # 무시해야 하는 뒷 부분들은 전부 True로 채워진다.. 
-        ignore_indices = torch.nonzero(bool_tensor).tolist() # 무시해야 하는 인덱스들 
-        # breakpoint()
-
-        # ignore_indices = True에 해당하는 위치의 값은 squared_error에서 0으로 바꾸기 -> Loss값에 영향을 주지 않도록. 
-        for idx in ignore_indices:
-            # breakpoint() # tuple(idx) : (33,)
-            squared_error[tuple(idx)] = torch.zeros_like(squared_error[idx]).squeeze() # grad_fn=<CopySlices>
-            variance[tuple(idx)] = torch.zeros_like(variance[idx]).squeeze() # grad_fn=<CopySlices>
-            # squared_error[tuple(idx)] : tensor([9.9999e-01, 4.4522e-11, 1.6663e-10,  ..., 4.4522e-11, 4.4522e-11, 1.5924e-09], device='cuda:0', grad_fn=<SelectBackward0>) -> torch.Size([57580])
-            # torch.zeros_like(squared_error[idx]).shape : tensor([[0., 0., 0.,  ..., 0., 0., 0.]], device='cuda:0') -> torch.Size([1, 57580])
-        
-        """
 
         loglikelihood_err = torch.sum(squared_error, dim=1, keepdim=True) # grad_fn=<SumBackward1>
         loglikelihood_var = torch.sum(variance, dim=1, keepdim=True) # grad_fn=<SumBackward1>
@@ -297,24 +277,33 @@ class BARTDecoder(nn.Module):
         
         return loglikelihood
     
+    def relu_evidence(self, output):
+        return torch.nn.functional.relu(output)
+
+    def softplus_evidence(self, output):
+        # breakpoint()
+        return self.softplus(output)
     
-    def one_hot_embedding(self, labels, num_classes):
-        y = torch.eye(num_classes, device = 'cpu')
+    def exp_evidence(self, output): 
+        clipped_output = torch.clamp(output, min=-10, max=10)
+        return torch.exp(clipped_output)
+        
+    
+    def one_hot_embedding(self, labels, num_classes, ignore_index): # len(labels) : 767
+        y = torch.eye(num_classes, device = 'cpu') # torch.Size([57580, 57580])
         labels_cpu = labels.cpu()
         # print(labels_cpu.device)
 
-        # -100인 것들은 0으로.. 
-        labels_cpu = torch.where(labels_cpu == -100, torch.zeros_like(labels_cpu), labels_cpu)
-        # breakpoint()
+        # breakpoint() # ignore_id도 여기서 같이 해버리자. 
+        labels_cpu = labels_cpu[labels_cpu != ignore_index]
 
-        # y[labels_cpu]은 그니까, -100이었던 것들은, 0번째 인덱스가 1로 된 거지. 
-        # 뒷 부분은 다 0번째 인덱스가 1로 된 원 핫이라 보면 된다 
-        return y[labels_cpu] 
+        # breakpoint()
+        
+        return y[labels_cpu] # torch.Size([33, 57580])
     
     
     def kl_divergence(self, alpha, num_classes):
-        # if not device:
-        #     device = 'cuda'
+
         ones = torch.ones([1, num_classes], dtype=alpha.dtype, device = alpha.device)
         sum_alpha = torch.sum(alpha, dim=1, keepdim=True)
         first_term = (
@@ -331,95 +320,115 @@ class BARTDecoder(nn.Module):
         kl = first_term + second_term
         return kl
     
-    def edl_loss(self, func, y, alpha, epoch_num, num_classes, annealing_step, ignore_index, labels):
+    def edl_loss(self, func, y, alpha, epoch_num, num_classes, annealing_step):
         y = y.to('cuda')
         alpha = alpha.to('cuda')
 
-        # breakpoint() # 알파 -> # torch.Size([767, 57580])
-
-        # ignore index 하는 부분 추가 
         S = torch.sum(alpha, dim=1, keepdim=True)
-        A = torch.sum(y[labels != ignore_index] * (func(S[labels != ignore_index]) - func(alpha[labels != ignore_index])), dim=1, keepdim=True)
+        A = torch.sum(y * (func(S) - func(alpha)), dim=1, keepdim=True)
 
         # 마찬가지로, kl term은 우선 무시
+        annealing_coef = torch.min(
+            torch.tensor(1.0, dtype=torch.float32),
+            torch.tensor(epoch_num / annealing_step, dtype=torch.float32),
+        )
+        kl_alpha = (alpha - 1) * (1 - y) + 1
+        kl_div = annealing_coef * self.kl_divergence(kl_alpha, num_classes)
+
+        return A + kl_div
+    
+    def edl_loss_ignore_kl(self, func, y, alpha, epoch_num, num_classes, annealing_step):
+        y = y.to('cuda')
+        alpha = alpha.to('cuda')
+
+        S = torch.sum(alpha, dim=1, keepdim=True)
+        A = torch.sum(y * (func(S) - func(alpha)), dim=1, keepdim=True)
+
+        # kl term은 우선 무시
         # annealing_coef = torch.min(
         #     torch.tensor(1.0, dtype=torch.float32),
         #     torch.tensor(epoch_num / annealing_step, dtype=torch.float32),
         # )
         # kl_alpha = (alpha - 1) * (1 - y) + 1
-        # kl_div = annealing_coef * kl_divergence(kl_alpha, num_classes, device=device)
+        # kl_div = annealing_coef * self.kl_divergence(kl_alpha, num_classes)
 
         return A # + kl_div
     
 
-    def mse_loss(self, y, alpha, epoch_num, num_classes, annealing_step, ignore_index, labels):
-        # if not device:
-        #     device = 'cuda'
+    def mse_loss(self, y, alpha, epoch_num, num_classes, annealing_step):
+
         y = y.to('cuda')
         alpha = alpha.to('cuda')
 
-        loglikelihood = self.loglikelihood_loss(y, alpha, ignore_index, labels)
+        loglikelihood = self.loglikelihood_loss(y, alpha)
 
-        """
-        여기서도 ignore_index에 대응되는 Loss값들은 다 0으로 만들어야되나..? 
-        gpt는 아니라고 하긴 했는데, 음... 
-
+        """ 
         일단 아래가 원래 코드.. 
         kl_alpha = (alpha - 1) * (1 - torch.tensor(y)).to('cuda') + 1 # torch.Size([767, 57580])
         kl_div = annealing_coef * self.kl_divergence(kl_alpha, num_classes) # torch.Size([767, 1])
         """
-
-        """
+        # 마찬가지로, kl term은 우선 무시
         annealing_coef = torch.min(
             torch.tensor(1.0, dtype=torch.float16),
             torch.tensor(epoch_num / annealing_step, dtype=torch.float16),
         )
 
-        # 초기화
-        kl_alpha = torch.zeros(len(labels[labels != ignore_index]), 57580) # torch.Size([33, 57580])
-        kl_div = torch.zeros(len(labels[labels != ignore_index]), 1) # torch.Size([33, 1])
-
-
-        kl_alpha = (alpha[labels != ignore_index] - 1) * (1 - torch.tensor(y[labels != ignore_index])).to('cuda') + 1 # torch.Size([33, 57580])
+        kl_alpha = (alpha - 1) * (1 - torch.tensor(y)).to('cuda') + 1 # torch.Size([33, 57580])
         kl_div = annealing_coef * self.kl_divergence(kl_alpha, num_classes) # torch.Size([33, 1])
-        # kl_div 형식 확인해야 할 것 같은데.. 원래 torch.Size([767, 1]) 였대.. 2중이었던건가? 
-        """
 
+        return loglikelihood + kl_div
+    
+    def mse_loss_ignore_kl(self, y, alpha, epoch_num, num_classes, annealing_step):
 
-        """ 교수님께서 보셨다면 분명 위에처럼 비효율적이라고 수정하라고 하셨을 것임 
-        # kl_div에도 ignore_index값이 적용되도록 해보았음 
-        kl_alpha = (alpha - 1) * (1 - torch.tensor(y)).to('cuda') + 1 # torch.Size([767, 57580])
-        kl_div = annealing_coef * self.kl_divergence(kl_alpha, num_classes) # torch.Size([767, 1])
+        y = y.to('cuda')
+        alpha = alpha.to('cuda')
 
-        # ignore_index = -100 -> 0로 된 부분 무시하도록 하는 부분
-        bool_tensor = torch.tensor(labels) == ignore_index # 무시해야 하는 뒷 부분들은 전부 True로 채워진다.. 
-        ignore_indices = torch.nonzero(bool_tensor).tolist() # 무시해야 하는 인덱스들 
+        loglikelihood = self.loglikelihood_loss(y, alpha)
 
-        # ignore_indices = True에 해당하는 위치의 값은 Loss값 0으로 바꾸기 -> Loss값에 영향을 주지 않도록. 
-        for idx in ignore_indices:
-            # breakpoint()
-            # 여기서도 형식 다른거 아니야? 확인해볼래? -> squeeze 해줬음 -> 여기선 squeeze(0) 해줬음. 그냥 squeeze() 해주면 0차원 되던데
-            kl_div[tuple(idx)] = torch.zeros_like(kl_div[idx]).squeeze(0) # grad_fn=<CopySlices>
-            # kl_div[tuple(idx)] : tensor([0.], device='cuda:0', grad_fn=<SelectBackward0>) 
-            # kl_div[tuple(idx)].shape : torch.Size([1])
-        """
-        
+        # 마찬가지로, kl term은 우선 무시
+        # annealing_coef = torch.min(
+        #     torch.tensor(1.0, dtype=torch.float16),
+        #     torch.tensor(epoch_num / annealing_step, dtype=torch.float16),
+        # )
+
+        # kl_alpha = (alpha - 1) * (1 - torch.tensor(y)).to('cuda') + 1 # torch.Size([33, 57580])
+        # kl_div = annealing_coef * self.kl_divergence(kl_alpha, num_classes) # torch.Size([33, 1])
+
         return loglikelihood # + kl_div
     
-    def edl_log_loss(self, output, target, epoch_num, num_classes, annealing_step, ignore_index, labels):
-        # if not device:
-        #     device = get_device()
+    def edl_log_loss(self, output, target, epoch_num, num_classes, annealing_step, real_num_id, ignore_kl, evidence_type):
+
         output_cuda = output.cuda()
-        evidence = torch.nn.functional.relu(output_cuda)
-        alpha = evidence + 1
 
-        num_real_id = len(labels[labels != ignore_index])
+        if evidence_type == 'relu':
+            evidence = self.relu_evidence(output_cuda)
+            alpha = evidence + 1.0
 
-        loss = torch.sum(
-            self.edl_loss(
-                torch.log, target, alpha, epoch_num, num_classes, annealing_step, ignore_index, labels)
-        )/ float(num_real_id)
+        elif evidence_type == 'softplus':
+            evidence = self.softplus_evidence(output_cuda)
+            alpha = evidence + 1.0
 
+        elif evidence_type == 'exp':
+            evidence = self.exp_evidence(output_cuda)
+            alpha = evidence + 1.0
+        
+        else : 
+            print("evidence type : relu, softplus, exp 중 하나")
+
+        if ignore_kl == False:
+            loss = torch.sum(
+                self.edl_loss(
+                    torch.log, target, alpha, epoch_num, num_classes, annealing_step)
+            )/ float(real_num_id)
+
+        elif ignore_kl == True:
+            loss = torch.sum(
+                self.edl_loss_ignore_kl(
+                    torch.log, target, alpha, epoch_num, num_classes, annealing_step)
+            )/ float(real_num_id)
+        
+        else : 
+            print("그래서 kl ignore 할거야 말거야")
 
         # 이 아래가 원래 loss...
         # loss = torch.mean(
@@ -429,21 +438,39 @@ class BARTDecoder(nn.Module):
         # )
         return loss
     
-    def edl_digamma_loss(self, output, target, epoch_num, num_classes, annealing_step, ignore_index, labels):
-        # if not device:
-        #     device = get_device()
+    def edl_digamma_loss(self, output, target, epoch_num, num_classes, annealing_step, real_num_id, ignore_kl, evidence_type):
 
         output_cuda = output.cuda()
-        evidence = torch.nn.functional.relu(output_cuda)
-        alpha = evidence + 1
 
-        num_real_id = len(labels[labels != ignore_index])
+        if evidence_type == 'relu':
+            evidence = self.relu_evidence(output_cuda)
+            alpha = evidence + 1.0
 
-        loss = torch.sum(
-            self.edl_loss(
-                torch.digamma, target, alpha, epoch_num, num_classes, annealing_step, ignore_index, labels)
-        ) / float(num_real_id)
+        elif evidence_type == 'softplus':
+            evidence = self.softplus_evidence(output_cuda)
+            alpha = evidence + 1.0
 
+        elif evidence_type == 'exp':
+            evidence = self.exp_evidence(output_cuda)
+            alpha = evidence + 1.0
+        
+        else : 
+            print("evidence type : relu, softplus, exp 중 하나")
+
+        if ignore_kl == False:
+            loss = torch.sum(
+                self.edl_loss(
+                    torch.digamma, target, alpha, epoch_num, num_classes, annealing_step)
+            ) / float(real_num_id)
+
+        elif ignore_kl == True: 
+            loss = torch.sum(
+                self.edl_loss_ignore_kl(
+                    torch.digamma, target, alpha, epoch_num, num_classes, annealing_step)
+            ) / float(real_num_id)
+        
+        else : 
+            print("그래서 ignore kl 할거야 말거야")
 
         # 이 아래가 원래 loss
         # loss = torch.mean(
@@ -454,21 +481,39 @@ class BARTDecoder(nn.Module):
 
         return loss
 
-    def edl_mse_loss(self, output, target, epoch_num, num_classes, annealing_step, ignore_index, labels):
-        # if not device:
-        #     device = 'cuda'
+    def edl_mse_loss(self, output, target, epoch_num, num_classes, annealing_step, real_num_id, ignore_kl, evidence_type):
+
         output_cuda = output.cuda()
-        evidence = torch.nn.functional.relu(output_cuda)
-        alpha = evidence + 1
 
-        # 아래 코드로 돌리니까 Loss값이 예전으로 돌아갔어.. 다시 0.9999 막 이래.. 
-        num_real_id = len(labels[labels != ignore_index])
+        if evidence_type == 'relu':
+            evidence = self.relu_evidence(output_cuda)
+            alpha = evidence + 1.0
 
-        # breakpoint()
+        elif evidence_type == 'softplus':
+            evidence = self.softplus_evidence(output_cuda)
+            # breakpoint()
+            alpha = evidence + 1.0
 
-        loss = torch.sum(
-            self.mse_loss(target, alpha, epoch_num, num_classes, annealing_step, ignore_index, labels)
-        ) / float(num_real_id)
+        elif evidence_type == 'exp':
+            evidence = self.exp_evidence(output_cuda)
+            alpha = evidence + 1.0
+        
+        else : 
+            print("evidence type : relu, softplus, exp 중 하나")
+
+
+        if ignore_kl == False:
+            loss = torch.sum(
+                self.mse_loss(target, alpha, epoch_num, num_classes, annealing_step)
+            ) / float(real_num_id)
+
+        elif ignore_kl == True:
+            loss = torch.sum(
+                self.mse_loss_ignore_kl(target, alpha, epoch_num, num_classes, annealing_step)
+            ) / float(real_num_id)
+
+        else : 
+            print("ignore_kl 할 건지 말건지 선택")
         
         # 이 아래가 원래 loss...
         # loss = torch.mean(
@@ -534,33 +579,40 @@ class BARTDecoder(nn.Module):
 
         """lm_head를 이용해서 계산됨 -> 이 logit이 inference 할땐 어찌 저찌 계산되어 decoder_output.scores로 나오는 걸 확인했음."""
         logits = self.model.lm_head(outputs[0]) # torch.Size([1, 767, 57580]) # grad_fn=<UnsafeViewBackward0> 
-        """내가 추가해준 edl_layer을 이용해서 계산되었음 -> 이 alphas가 inference할 때 edl_scores로 나오도록 코드 작성해줬음."""
-        edl_logits = self.model.edl_layer(outputs[0]) # torch.Size([1, 767, 57580]) # grad_fn=<UnsafeViewBackward0>
-
-
-        alphas = torch.nn.functional.relu(edl_logits) + 1
-        # alphas = torch.nn.functional.relu(logits) + 1 # grad_fn=<AddBackward0>  
+        alphas = torch.nn.functional.relu(logits) + 1 # grad_fn=<AddBackward0>   
       
+
         loss = None
-        if labels is not None: # train할때만 실행됨 
-            
+        if labels is not None: # train할때만 실행됨  # labels.shape : torch.Size([1, 767])
             print("이게 alphas - 학습이 진행됨에 따라 어떻게 변하고 있어? : ", alphas)
 
             # 기존 donutmodel에서 학습시키던 loss function : cross_entropy
-            loss_fct = nn.CrossEntropyLoss(ignore_index=-100) # igenore_id값이 -100으로 들어가는구나
-            ce_loss = loss_fct(logits.view(-1, self.model.config.vocab_size), labels.view(-1)) # vocab_size는 57580
+            # loss_fct = nn.CrossEntropyLoss(ignore_index=-100) # igenore_id값이 -100으로 들어가는구나
+            # ce_loss = loss_fct(logits.view(-1, self.model.config.vocab_size), labels.view(-1)) # vocab_size는 57580
             
 
             # edl_loss로 학습시키려면
-            y = self.one_hot_embedding(labels.view(-1), self.model.config.vocab_size) # vocab_size # 57580
-            # edl_mse_loss, edl_log_loss, edl_digamma_loss 3 중 하나 선택인데, 논문에선 edl_mse_loss가 좋다고 하였음.
-            # self.model.config.vocab_size = 57580
-            edl_loss = self.edl_digamma_loss(
-                edl_logits.view(-1, self.model.config.vocab_size), y.float(), epoch, self.model.config.vocab_size, annealing_step = 10, ignore_index = -100, labels = labels.view(-1)
+            real_num_id = len(labels[0][labels[0] != -100].tolist())
+
+            # 이 함수 안에서 ignore index 됨 
+            y = self.one_hot_embedding(labels.view(-1), self.model.config.vocab_size, ignore_index = -100) # vocab_size # 57580
+            # y.shape : torch.Size([33, 57580]) # 이미 ignore_index 된 상태 
+
+            logits_ = logits.view(-1, self.model.config.vocab_size) # logits_.shape : torch.Size([767, 57580])
+            logits_ignored_id = logits_[labels[0] != -100] # ignore_index 되었음 - shape : torch.Size([33, 57580])
+            # breakpoint()
+
+            # edl_mse_loss, edl_log_loss, edl_digamma_loss 3 중 하나 선택, 
+            # ignore_kl = True로 하면, kl term이 무시됨
+            # evidence_type = 'relu' or 'softplus' or 'exp' 중 하나 선택
+            edl_loss = self.edl_log_loss( # self.model.config.vocab_size = 57580
+                logits_ignored_id, y.float(), epoch, self.model.config.vocab_size, annealing_step = 10, real_num_id = real_num_id, ignore_kl = False, evidence_type = 'exp',
             )
             
-            loss = ce_loss + 5 * edl_loss
-            print("ce loss : ", ce_loss)
+            # loss = ce_loss + edl_loss
+            loss = edl_loss
+
+            # print("ce loss : ", ce_loss)
             print("edl_loss : ", edl_loss)
             
             
@@ -572,7 +624,6 @@ class BARTDecoder(nn.Module):
         return ModelOutput(
             loss=loss,
             logits=logits,
-            edl_logits=edl_logits,
             alphas=alphas,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
@@ -711,6 +762,18 @@ class DonutModel(PreTrainedModel):
             epoch = self.current_epoch,
         )
 
+
+        """5번, 6번, freeze 시키는 경우 """
+        print("####### loss값 계산한 직후 - freeze 되었는지 확인") # 진짜 한 번 확인해볼까? 잘 freeze 되었는지  -> 잘 되긴 했는데, 혹시 모르니 
+        for param in self.parameters():
+            param.requires_grad = False
+        for last_param in self.decoder.model.lm_head.parameters():
+            last_param.requires_grad = True
+        for name, all_param in self.named_parameters():
+            if all_param.requires_grad == True : 
+                print("######## loss값 계산한 직후 - freeze 안된 layer : ", name)
+
+
         with torch.no_grad():
             loss = decoder_outputs.loss
             print("이게 이번 loss : ", loss)
@@ -723,17 +786,17 @@ class DonutModel(PreTrainedModel):
             # print("리스트의 value 개수, length : ", len(self.train_loss))
             self.edl_train_loss[self.current_epoch] = sum(self.train_loss) / len(self.train_loss)
 
-            with open('train_loss_edl_loss_4_0521_digamma_ft_cord_w5_lrx2.json','w') as f:
+            with open('train_loss_edl_loss_9_0609_edl_log_only_kl_exp.json','w') as f:
                 json.dump(self.edl_train_loss, f)
                 print("json 파일 생성")
             
             self.current_epoch += 1
             self.current_img_idx = 0
             self.train_loss = []
+            torch.cuda.empty_cache() 
         
         else:
             self.current_img_idx += 1
-
 
         return decoder_outputs
 
@@ -805,52 +868,27 @@ class DonutModel(PreTrainedModel):
             bad_words_ids=[[self.decoder.tokenizer.unk_token_id]],
             return_dict_in_generate=True,
             output_attentions=return_attentions,
-            output_scores=True,
-            output_edl_scores=True 
+            output_scores=True
         )
 
         print("decoder_output 나왔다...")
-        # breakpoint() # 여길 브레이크 포인트 걸면, decoder_output을 볼 수 있다 
-        # decoder_output : GreedySearchEncoderDecoderOutput
-            # sequences(모델이 예측한 id들로 이루어진 2중 리스트) 존재함, scores(before softmax) 존재함, encoder_attentions = None이래, 
-            # encoder_hidden_states = None이래, decoder_attentions = None이래, cross_attentions = None이래, decoder_hidden_states = None이래 
-            # 여기서 edl_scores : alpha_tensor야. -> 이제 이걸 갖고 probability 계산하면 됨 
 
 
         print("출력된 decoder_output.sequences : ", decoder_output.sequences)
-        # sequences = tensor([[57579, 57526, 57528, 20220, 38946,  4107, <- 이런 식으로 모델이 예측한 id값들이 나옴
-
-        # 교수님이 추가하신 부분! 여기서 scores = logits... 
-        # print(decoder_output.scores) # same as logits. before softmax
-        # scores=(tensor([[-30.1875,  -2.9492, -21.3906,  ...,   4.0977,   2.9395,   1.5752]], device='cuda:0', dtype=torch.float16), tensor([[-15.8516,  -2.9766, -13.1406,  ...,   2.9414,   1.6758,   0.5205]]
-        # id값 52개, (나중에 확률벡터로 바뀌는) scores - [[]] 이런 2중 리스트 52개..
-
-
-
-        """ 아래는 edl로 probability를 계산한 버전 -> 이 아래처럼 그냥 decoder_output.scores를 갖고 alpha를 계산하면 안되고,
-          내가 추가한 edl_layer에서 나온 값으로 alpha를 계산하고, 확률을 계산해야 함 """
-        edl_posterior_scores = []
-        for score_tensor in decoder_output.edl_scores: # 추가한 edl_layer에서 나온 output들(edl_scores)인거지 
-            # print(score_tensor.shape) # torch.Size([1, 57580])
-            
-            """확률을 계산하는 두 번째 방법 - softmax(alpha) """
-            alpha_tensor = score_tensor.to(torch.float64) 
-            edl_posterior_scores.append(torch.nn.functional.softmax(alpha_tensor[0], dim=0)) 
-
-
-            """확률을 계산하는 첫 번째 방법 - alpha / sum of alpha
-            alpha_tensor = torch.nn.functional.relu(score_tensor) + 1 # torch.Size([1, 57580]) 이건 해줄 필요 없어. 이미 alpha tensor야. 
-            alpha_zero = torch.sum(alpha_tensor, dim=1, keepdim=True) # dtype=torch.float16, torch.Size([1, 1])
-            prob_list = (alpha_tensor / float(alpha_zero))[0] # alpha값이 같은 1.000이라도, alpha_zero 값이 다르기 때문에 probability가 달라짐. 
-            edl_posterior_scores.append(prob_list) """
-            
-
-
-        """ 아래는 그냥 lm_head에서 나온 값들 -> softmax로 probability를 계산한 일반 버전 
-        decoder_output.scores에 softmax 취하면 됨. utils.py 확인해보면, scores는 outputs.logits에서 나온게 맞고, logits는 lm_head에서 나온게 맞음. """
         softmax_scores = []
         logit_scores = []
         for score_tensor in decoder_output.scores: # 이건 lm_head에서 나온 scores인거지 
+            # breakpoint() # score_tensor.shape : torch.Size([1, 57580])
+            
+            """ 0606
+            alpha_vec = torch.nn.functional.relu(score_tensor[0]) + 1.0 
+            # alpha_vec = torch.exp(score_tensor[0]) + 1.0 
+            alpha_zero = torch.sum(alpha_vec)
+
+            prob = alpha_vec / alpha_zero # shape : [57580]
+            softmax_scores.append(prob.tolist()) 
+            """
+            
             score_tensor = score_tensor.to(torch.float64)
             logit_scores.append(score_tensor[0])
             softmax_scores.append(torch.nn.functional.softmax(score_tensor[0], dim=0))
@@ -859,7 +897,10 @@ class DonutModel(PreTrainedModel):
         output = {"predictions": list()}
         model_pred_ids = decoder_output.sequences
 
+        logit_stack = torch.stack(decoder_output.scores)
+
         
+
         # 여기 batch_decode에서 id -> token이 이루어짐
         for seq in self.decoder.tokenizer.batch_decode(decoder_output.sequences):
 
@@ -894,12 +935,13 @@ class DonutModel(PreTrainedModel):
             }
 
 
-        output["logits"] = decoder_output.scores
         
-        # edl은 alpha를 갖고 확률을 계산
-        output["prob_alpha"] = edl_posterior_scores # 이건 내가 추가한 edl_layer에서 나온 값으로
-        output["prob_softmax"] = softmax_scores # 이건 기존 lm_head에서 나온 값으로
+        output["logits"] = logit_stack # 두 번째 방식으로 구한 거 
+        # output["logits"] = torch.tensor(softmax_scores).unsqueeze(1) # 첫 번째 방식으로 구한 확률 
 
+
+        # output["logits"] = decoder_output.scores
+        output["prob"] = softmax_scores # 이건 기존 lm_head에서 나온 값으로
         output["model_pred_id"] = model_pred_ids
 
         return output
@@ -1022,17 +1064,5 @@ class DonutModel(PreTrainedModel):
             model.config.max_position_embeddings = max_length
 
         return model
-
-    # 아래는 내가 추가한 부분 
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            # 이 부분은 train 할 때만 실행되고, test때는 실행 안됨 
-            module.weight.data.normal_(mean=0.0, std=0.05)  
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=0.05) 
-            if module.padding_idx is not None:
-                    module.weight.data[module.padding_idx].zero_()
     
     
