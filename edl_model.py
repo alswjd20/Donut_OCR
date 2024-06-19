@@ -27,7 +27,7 @@ import wandb
 import tensorflow as tf
 
 # uncertainty quantification for classification 논문 적용
-# => 9_edl
+# 4_edl 마지막으로 수정.. 0529... => 9_edl
 
 
 class SwinEncoder(nn.Module):
@@ -587,8 +587,8 @@ class BARTDecoder(nn.Module):
             print("이게 alphas - 학습이 진행됨에 따라 어떻게 변하고 있어? : ", alphas)
 
             # 기존 donutmodel에서 학습시키던 loss function : cross_entropy
-            # loss_fct = nn.CrossEntropyLoss(ignore_index=-100) # igenore_id값이 -100으로 들어가는구나
-            # ce_loss = loss_fct(logits.view(-1, self.model.config.vocab_size), labels.view(-1)) # vocab_size는 57580
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100) # igenore_id값이 -100으로 들어가는구나
+            ce_loss = loss_fct(logits.view(-1, self.model.config.vocab_size), labels.view(-1)) # vocab_size는 57580
             
 
             # edl_loss로 학습시키려면
@@ -606,13 +606,13 @@ class BARTDecoder(nn.Module):
             # ignore_kl = True로 하면, kl term이 무시됨
             # evidence_type = 'relu' or 'softplus' or 'exp' 중 하나 선택
             edl_loss = self.edl_log_loss( # self.model.config.vocab_size = 57580
-                logits_ignored_id, y.float(), epoch, self.model.config.vocab_size, annealing_step = 10, real_num_id = real_num_id, ignore_kl = False, evidence_type = 'exp',
+                logits_ignored_id, y.float(), epoch, self.model.config.vocab_size, annealing_step = 10, real_num_id = real_num_id, ignore_kl = True, evidence_type = 'exp',
             )
             
-            # loss = ce_loss + edl_loss
-            loss = edl_loss
+            loss = ce_loss + edl_loss
+            # loss = edl_loss
 
-            # print("ce loss : ", ce_loss)
+            print("ce loss : ", ce_loss)
             print("edl_loss : ", edl_loss)
             
             
@@ -763,17 +763,6 @@ class DonutModel(PreTrainedModel):
         )
 
 
-        """5번, 6번, freeze 시키는 경우 """
-        print("####### loss값 계산한 직후 - freeze 되었는지 확인") # 진짜 한 번 확인해볼까? 잘 freeze 되었는지  -> 잘 되긴 했는데, 혹시 모르니 
-        for param in self.parameters():
-            param.requires_grad = False
-        for last_param in self.decoder.model.lm_head.parameters():
-            last_param.requires_grad = True
-        for name, all_param in self.named_parameters():
-            if all_param.requires_grad == True : 
-                print("######## loss값 계산한 직후 - freeze 안된 layer : ", name)
-
-
         with torch.no_grad():
             loss = decoder_outputs.loss
             print("이게 이번 loss : ", loss)
@@ -786,7 +775,7 @@ class DonutModel(PreTrainedModel):
             # print("리스트의 value 개수, length : ", len(self.train_loss))
             self.edl_train_loss[self.current_epoch] = sum(self.train_loss) / len(self.train_loss)
 
-            with open('train_loss_edl_loss_9_0609_edl_log_only_kl_exp.json','w') as f:
+            with open('train_loss_edl_loss_9_0611_edl_log_exp_nk_full_tr.json','w') as f:
                 json.dump(self.edl_train_loss, f)
                 print("json 파일 생성")
             
@@ -873,25 +862,18 @@ class DonutModel(PreTrainedModel):
 
         print("decoder_output 나왔다...")
 
-
         print("출력된 decoder_output.sequences : ", decoder_output.sequences)
+        # sequences = tensor([[57579, 57526, 57528, 20220, 38946,  4107, <- 이런 식으로 모델이 예측한 id값들이 나옴
+            
+
         softmax_scores = []
         logit_scores = []
-        for score_tensor in decoder_output.scores: # 이건 lm_head에서 나온 scores인거지 
+        for score_tensor in decoder_output.scores: # 이건 lm_head에서 나온 scores
             # breakpoint() # score_tensor.shape : torch.Size([1, 57580])
-            
-            """ 0606
-            alpha_vec = torch.nn.functional.relu(score_tensor[0]) + 1.0 
-            # alpha_vec = torch.exp(score_tensor[0]) + 1.0 
-            alpha_zero = torch.sum(alpha_vec)
-
-            prob = alpha_vec / alpha_zero # shape : [57580]
-            softmax_scores.append(prob.tolist()) 
-            """
             
             score_tensor = score_tensor.to(torch.float64)
             logit_scores.append(score_tensor[0])
-            softmax_scores.append(torch.nn.functional.softmax(score_tensor[0], dim=0))
+            softmax_scores.append(torch.nn.functional.softmax(score_tensor[0], dim=0)) 
 
 
         output = {"predictions": list()}
@@ -899,20 +881,11 @@ class DonutModel(PreTrainedModel):
 
         logit_stack = torch.stack(decoder_output.scores)
 
-        
 
         # 여기 batch_decode에서 id -> token이 이루어짐
         for seq in self.decoder.tokenizer.batch_decode(decoder_output.sequences):
 
             print("seq : ", seq)
-            
-            # breakpoint() # 이 batch_decode가 id -> token 해주는 함수
-            # self.decoder.tokenizer.batch_decode(decoder_output.sequences) -> 보면, 토큰으로 바뀌어서 나온다 
-            # ['<s_cord-v2> <s_menu> <s_nm> - TICKET CP </s_nm> <s_num> ... </s_total> </s>' ] 이런 식으로
-            # id 값들 들어간 순서대로 그대로 token으로 변환되어 나옴 
-            # seq는, []가 없어진, '<s_cord-v2> <s_menu> <s_nm> - TICKET CP ... </s_total> </s>' 이런 형태
-            # print(self.decoder.tokenizer.eos_token) # </s>,  print(self.decoder.tokenizer.pad_token) # <pad>
-
 
             seq = seq.replace(self.decoder.tokenizer.eos_token, "").replace(self.decoder.tokenizer.pad_token, "")
             seq = re.sub(r"<.*?>", "", seq, count=1).strip()  # remove first task start token
@@ -921,11 +894,6 @@ class DonutModel(PreTrainedModel):
                 output["predictions"].append(self.token2json(seq)) # seq 출력해봤으면 알겠지만 토큰인데 -> 이를 json으로 바꿔주는 듯
             else:
                 output["predictions"].append(seq)
-            
-            # breakpoint() # 확인해본 결과, 
-            # decoder_output.sequences에는 tensor([[57579, 57526, 57528, 20220, 38946, ...]]) 다음과 같은 id값들이 들어가는데, 
-            # output에는 {'predictions': [{'menu': {'nm': '- TICKET CP', 'num': '901016', 'unitprice': '60.000', 'cnt': '2', 'price': '60.000'}, ..}
-            # 이렇게 mapping이 되어서 나타남 
 
 
         if return_attentions:
@@ -938,7 +906,6 @@ class DonutModel(PreTrainedModel):
         
         output["logits"] = logit_stack # 두 번째 방식으로 구한 거 
         # output["logits"] = torch.tensor(softmax_scores).unsqueeze(1) # 첫 번째 방식으로 구한 확률 
-
 
         # output["logits"] = decoder_output.scores
         output["prob"] = softmax_scores # 이건 기존 lm_head에서 나온 값으로
@@ -1064,5 +1031,17 @@ class DonutModel(PreTrainedModel):
             model.config.max_position_embeddings = max_length
 
         return model
+
+    # 아래는 내가 추가한 부분 
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            # 이 부분은 train 할 때만 실행되고, test때는 실행 안됨 
+            module.weight.data.normal_(mean=0.0, std=0.05)  
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=0.05) 
+            if module.padding_idx is not None:
+                    module.weight.data[module.padding_idx].zero_()
     
     
